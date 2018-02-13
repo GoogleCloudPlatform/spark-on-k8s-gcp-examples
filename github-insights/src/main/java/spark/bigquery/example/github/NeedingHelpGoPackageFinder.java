@@ -29,6 +29,10 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.commons.cli.BasicParser;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.Options;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.sql.Dataset;
@@ -49,16 +53,16 @@ import scala.Tuple2;
  */
 public class NeedingHelpGoPackageFinder {
 
-  private static final String GO_FILES_QUERY =
+  private static final String GO_FILES_QUERY_TEMPLATE =
       "SELECT id\n"
-          + "FROM [bigquery-public-data:github_repos.sample_files]\n"
+          + "FROM [bigquery-public-data:github_repos.%s]\n"
           + "WHERE RIGHT(path, 3) = '.go'";
 
   private static final String GO_FILES_TABLE = "go_files";
 
   private static final String GO_CONTENTS_QUERY_TEMPLATE =
       "SELECT sample_repo_name as repo_name, content\n"
-          + "FROM [bigquery-public-data:github_repos.sample_contents]\n"
+          + "FROM [bigquery-public-data:github_repos.%s]\n"
           + "WHERE id IN (SELECT id FROM %s.%s)";
 
   private static final String POPULAR_PACKAGES_QUERY_TEMPLATE =
@@ -114,7 +118,13 @@ public class NeedingHelpGoPackageFinder {
   private final SQLContext sqlContext;
   private final BigQuerySQLContext bigQuerySQLContext;
 
-  private NeedingHelpGoPackageFinder(String projectId, String bigQueryDataset, String gcsBucket) {
+  private final boolean useSampleTables;
+
+  private NeedingHelpGoPackageFinder(
+      String projectId,
+      String bigQueryDataset,
+      String gcsBucket,
+      boolean useSampleTables) {
     Preconditions.checkArgument(!Strings.isNullOrEmpty(projectId),
         "GCP project ID must not be empty");
     Preconditions.checkArgument(!Strings.isNullOrEmpty(bigQueryDataset),
@@ -129,9 +139,17 @@ public class NeedingHelpGoPackageFinder {
     this.bigQuerySQLContext = new BigQuerySQLContext(this.sqlContext);
     this.bigQuerySQLContext.setBigQueryProjectId(projectId);
     this.bigQuerySQLContext.setBigQueryGcsBucket(gcsBucket);
+
+    this.useSampleTables = useSampleTables;
   }
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws Exception {
+    Options opts = new Options();
+    opts.addOption("usesample", false, "Use the sample tables if present.");
+    CommandLineParser parser = new BasicParser();
+    CommandLine cmd = parser.parse(opts, args);
+    args = cmd.getArgs();
+
     if (args.length != 3) {
       System.err.println("Usage: NeedingHelpGoPackageFinder "
           + "<GCP project ID for billing> "
@@ -144,7 +162,7 @@ public class NeedingHelpGoPackageFinder {
     String bigQueryDataset = args[1];
     String gcsBucket = args[2];
     NeedingHelpGoPackageFinder finder = new NeedingHelpGoPackageFinder(projectId, bigQueryDataset,
-        gcsBucket);
+        gcsBucket, cmd.hasOption("usesample"));
     finder.run();
   }
 
@@ -174,7 +192,8 @@ public class NeedingHelpGoPackageFinder {
    * given BigQuery table.
    */
   private void selectAndOutputGoFilesTable(String outputTableId) {
-    Dataset<Row> dataset = this.bigQuerySQLContext.bigQuerySelect(GO_FILES_QUERY);
+    Dataset<Row> dataset = this.bigQuerySQLContext.bigQuerySelect(
+        String.format(GO_FILES_QUERY_TEMPLATE, this.useSampleTables ? "sample_files" : "files"));
     BigQueryDataFrame bigQueryDataFrame = new BigQueryDataFrame(dataset);
     bigQueryDataFrame.saveAsBigQueryTable(outputTableId, CreateDisposition.CREATE_IF_NEEDED(),
         WriteDisposition.WRITE_EMPTY());
@@ -188,7 +207,11 @@ public class NeedingHelpGoPackageFinder {
   private Dataset<Row> queryAndCacheGoContents() {
     Dataset<Row> dataset = this.bigQuerySQLContext
         .bigQuerySelect(
-            String.format(GO_CONTENTS_QUERY_TEMPLATE, this.bigQueryDataset, GO_FILES_TABLE));
+            String.format(
+              GO_CONTENTS_QUERY_TEMPLATE,
+              this.useSampleTables ? "sample_contents" : "contents",
+              this.bigQueryDataset,
+              GO_FILES_TABLE));
     return dataset.persist(StorageLevel.MEMORY_AND_DISK());
   }
 
